@@ -13212,19 +13212,46 @@ def _release_create_flow_lock(lock: Optional[int]) -> None:
 
 
 _CONNECT_INTENT = re.compile(
-    r"(?ix)\b(?:connect|log\s?in|sign\s?in|authenticate|auth\b|"
-    r"set\s+(?:the\s+)?(?:default\s+)?(?:target[-\s]?)?org|set\s+default|"
-    r"(?:choose|pick|select|use)\s+(?:an?\s+|my\s+|the\s+)?org)\b"
+    r"(?ix)"
+    # A connection/authentication action must be close to a Salesforce org target.
+    # Keep bare "org" for normal Salesforce shorthand, but require the Salesforce
+    # qualifier when the full word "organization" is used (it is otherwise generic).
+    r"\b(?:connect|log\s?in|sign\s?in|authenticate|auth)\b"
+    r"[^.!?\n]{0,50}\b(?:salesforce\s+(?:org|organization)|org|sandbox|dev\s+hub)\b"
+    r"|"
+    r"\b(?:salesforce\s+(?:org|organization)|org|sandbox|dev\s+hub)\b"
+    r"[^.!?\n]{0,50}\b(?:connect|log\s?in|sign\s?in|authenticate|auth)\b"
+    r"|"
+    # Explicit target-org selection remains a connect intent.
+    r"\bset\s+(?:(?:the|my)\s+)?(?:default\s+)?"
+    r"(?:target[-\s]?)?org\b"
+    r"|"
+    r"\b(?:choose|pick|select|use)\s+"
+    r"(?:an?\s+|my\s+|the\s+)?(?:salesforce\s+)?org\b"
 )
 
 
 def _is_connect_intent(prompt: str) -> bool:
-    """A prompt about connecting/choosing an org — the D9/D10 connect moment. The
-    plugin NEVER runs `sf org login` itself, so on this intent it does a cheap
-    `sf`-on-PATH check plus local target/auth reads and hands the model a
-    re-orientation note (see _connect_flow_note). The post-login wayfinder still owns
-    re-orientation AFTER a real login runs, so the two never double up."""
-    return isinstance(prompt, str) and bool(_CONNECT_INTENT.search(prompt))
+    """Return True only for prompts about connecting to or selecting a Salesforce org."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        return False
+
+    # Ignore a connection action when its direct target is clearly GitHub or a
+    # generic connector. Do not suppress the whole prompt just because it mentions
+    # GitHub, a passkey, or another unrelated service elsewhere.
+    if re.search(
+        r"(?i)\b(?:connect|log\s?in|sign\s?in|authenticate)\s+"
+        r"(?:the\s+)?(?:github|a\s+connector|the\s+connector)\b",
+        prompt,
+    ):
+        return False
+
+    # A sandbox login page is a browser destination, not a request to connect
+    # a Salesforce org through the CLI.
+    if re.search(r"(?i)\b(?:sandbox\s+)?login\s+page\b", prompt):
+        return False
+
+    return bool(_CONNECT_INTENT.search(prompt))
 
 
 _CREATE_PROJECT_INTENT = re.compile(
@@ -13398,7 +13425,7 @@ def _connect_flow_note(root: Path) -> str:
 
     Four honest outcomes:
       - `sf` absent          → route to environment setup (no login attempt).
-      - target already set   → nothing to connect; confirm and proceed.
+      - target already set   → continue with the actual request without unnecessary confirmation.
       - no target, has auth  → the D10 (a)/(b) ternary (existing org / scratch org).
       - no target, no auth   → D10 (c): the zero-org newcomer — a minimal pointer to a
                                free Developer Edition web signup, then return.
@@ -13413,10 +13440,10 @@ def _connect_flow_note(root: Path) -> str:
         )
     if _has_target_org(root):
         return (
-            "The user mentioned connecting an org, but one is ALREADY set as the target here (a local "
-            "or global default). There is nothing to connect — confirm the current target and continue "
-            "with their actual request; only run a login if they explicitly ask to switch to a "
-            "different org (the post-connect wayfinder re-orients if they do)."
+            "A target org is already set here. Do not ask the user to confirm it "
+            "unless they explicitly ask which org is selected or ask to switch orgs. "
+            "Continue with their actual request. Only run a login if they explicitly "
+            "ask to connect or switch to a different org."
         )
     if _has_authed_org():
         return (
